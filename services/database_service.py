@@ -27,11 +27,15 @@ class DatabaseService:
                     owner_username TEXT,
                     owner_full_name TEXT,
                     chat_title TEXT,
+                    chat_link TEXT,
                     gate_enabled INTEGER NOT NULL DEFAULT 1,
                     chat_category TEXT,
                     max_sponsors INTEGER NOT NULL DEFAULT 3,
                     subscription_reset_minutes INTEGER NOT NULL DEFAULT 60,
                     bot_message_delete_seconds INTEGER NOT NULL DEFAULT 60,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    moderated_at TEXT,
+                    moderated_by INTEGER,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
@@ -133,9 +137,14 @@ class DatabaseService:
                 CREATE TABLE IF NOT EXISTS user_resources (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     owner_user_id INTEGER NOT NULL,
+                    owner_username TEXT,
                     title TEXT NOT NULL,
                     url TEXT NOT NULL,
+                    category TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
                     created_at TEXT NOT NULL,
+                    moderated_at TEXT,
+                    moderated_by INTEGER,
                     UNIQUE(owner_user_id, url)
                 );
 
@@ -165,6 +174,23 @@ class DatabaseService:
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS referrals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    referrer_user_id INTEGER NOT NULL,
+                    referred_user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(referred_user_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS referral_earnings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    referrer_user_id INTEGER NOT NULL,
+                    referred_user_id INTEGER NOT NULL,
+                    amount REAL NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
                 """
             )
             self._ensure_column(connection, "chat_owners", "gate_enabled", "INTEGER NOT NULL DEFAULT 1")
@@ -172,6 +198,10 @@ class DatabaseService:
             self._ensure_column(connection, "chat_owners", "max_sponsors", "INTEGER NOT NULL DEFAULT 3")
             self._ensure_column(connection, "chat_owners", "subscription_reset_minutes", "INTEGER NOT NULL DEFAULT 60")
             self._ensure_column(connection, "chat_owners", "bot_message_delete_seconds", "INTEGER NOT NULL DEFAULT 60")
+            self._ensure_column(connection, "chat_owners", "chat_link", "TEXT")
+            self._ensure_column(connection, "chat_owners", "status", "TEXT NOT NULL DEFAULT 'pending'")
+            self._ensure_column(connection, "chat_owners", "moderated_at", "TEXT")
+            self._ensure_column(connection, "chat_owners", "moderated_by", "INTEGER")
             self._ensure_column(connection, "contests", "content_text", "TEXT")
             self._ensure_column(connection, "contests", "photo_file_id", "TEXT")
             self._ensure_column(connection, "contests", "contest_channel_id", "TEXT")
@@ -180,6 +210,11 @@ class DatabaseService:
             self._ensure_column(connection, "contests", "time_limit_minutes", "INTEGER NOT NULL DEFAULT 1440")
             self._ensure_column(connection, "contests", "participants_limit", "INTEGER")
             self._ensure_column(connection, "contests", "completion_type", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(connection, "user_resources", "owner_username", "TEXT")
+            self._ensure_column(connection, "user_resources", "category", "TEXT")
+            self._ensure_column(connection, "user_resources", "status", "TEXT NOT NULL DEFAULT 'pending'")
+            self._ensure_column(connection, "user_resources", "moderated_at", "TEXT")
+            self._ensure_column(connection, "user_resources", "moderated_by", "INTEGER")
             # Migrate post_url to be nullable
             self._migrate_contests_post_url_nullable(connection)
 
@@ -287,22 +322,24 @@ class DatabaseService:
         owner_username: str | None,
         owner_full_name: str,
         chat_title: str | None,
+        chat_link: str | None = None,
     ) -> None:
         now = self._now()
         with self._connect() as connection:
             connection.execute(
                 """
                 INSERT INTO chat_owners (
-                    chat_id, owner_user_id, owner_username, owner_full_name, chat_title, gate_enabled, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                    chat_id, owner_user_id, owner_username, owner_full_name, chat_title, chat_link, gate_enabled, status, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 'pending', ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                     owner_user_id = excluded.owner_user_id,
                     owner_username = excluded.owner_username,
                     owner_full_name = excluded.owner_full_name,
                     chat_title = excluded.chat_title,
+                    chat_link = excluded.chat_link,
                     updated_at = excluded.updated_at
                 """,
-                (chat_id, owner_user_id, owner_username, owner_full_name, chat_title, now, now),
+                (chat_id, owner_user_id, owner_username, owner_full_name, chat_title, chat_link, now, now),
             )
 
     def register_task_assignments(self, chat_id: int, member_user_id: int, tasks: list[dict]) -> int:
@@ -723,30 +760,30 @@ class DatabaseService:
 
         return completed_contests
 
-    def add_user_resource(self, owner_user_id: int, title: str, url: str) -> bool:
-        """Добавляет ресурс пользователя"""
+    def add_user_resource(self, owner_user_id: int, owner_username: str | None, title: str, url: str) -> bool:
+        """Добавляет ресурс пользователя на модерацию"""
         now = self._now()
         with self._connect() as connection:
             try:
                 connection.execute(
                     """
-                    INSERT INTO user_resources (owner_user_id, title, url, created_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO user_resources (owner_user_id, owner_username, title, url, status, created_at)
+                    VALUES (?, ?, ?, ?, 'pending', ?)
                     """,
-                    (owner_user_id, title, url, now),
+                    (owner_user_id, owner_username, title, url, now),
                 )
                 return True
             except sqlite3.IntegrityError:
                 return False
 
     def list_user_resources(self, owner_user_id: int) -> list[dict]:
-        """Получает список ресурсов пользователя"""
+        """Получает список ресурсов пользователя (только одобренные)"""
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT id, title, url, created_at
+                SELECT id, title, url, category, status, created_at
                 FROM user_resources
-                WHERE owner_user_id = ?
+                WHERE owner_user_id = ? AND status = 'approved'
                 ORDER BY created_at DESC
                 """,
                 (owner_user_id,),
@@ -952,7 +989,7 @@ class DatabaseService:
                           AND tr.owner_user_id = c.owner_user_id
                     ) AS earned_total
                 FROM chat_owners c
-                WHERE c.owner_user_id = ?
+                WHERE c.owner_user_id = ? AND c.status = 'approved'
                 ORDER BY c.updated_at DESC, c.chat_title ASC
                 """,
                 (owner_user_id,),
@@ -995,7 +1032,7 @@ class DatabaseService:
                           AND tr.owner_user_id = c.owner_user_id
                     ) AS earned_total
                 FROM chat_owners c
-                WHERE c.owner_user_id = ? AND c.chat_id = ?
+                WHERE c.owner_user_id = ? AND c.chat_id = ? AND c.status = 'approved'
                 """,
                 (owner_user_id, chat_id),
             ).fetchone()
@@ -1150,6 +1187,19 @@ class DatabaseService:
                 (chat_id, member_user_id, now),
             )
         return True
+
+    def count_approved_members(self, chat_id: int) -> int:
+        """Подсчитывает количество одобренных пользователей в чате"""
+        with self._connect() as connection:
+            result = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM chat_access
+                WHERE chat_id = ?
+                """,
+                (chat_id,),
+            ).fetchone()
+            return result[0] if result else 0
 
     def reward_chat_owner_for_member(self, chat_id: int, member_user_id: int) -> bool:
         now = self._now()
@@ -1581,6 +1631,11 @@ class DatabaseService:
                 (user_id, user_id, user_id, amount, datetime.now(timezone.utc).isoformat())
             )
 
+            # Начисляем реферальный бонус, если есть реферер
+            referrer_id = self.get_referrer(user_id)
+            if referrer_id:
+                self.add_referral_earning(referrer_id, user_id, amount, 'topup')
+
             connection.commit()
             return True
 
@@ -1651,6 +1706,14 @@ class DatabaseService:
     def approve_withdrawal(self, withdrawal_id: int, admin_id: int, check_url: str) -> bool:
         """Одобрить заявку на вывод"""
         with self._connect() as connection:
+            # Получаем информацию о заявке
+            withdrawal = self.get_withdrawal_request(withdrawal_id)
+            if not withdrawal:
+                return False
+
+            user_id = withdrawal['user_id']
+            amount = withdrawal['amount']
+
             connection.execute(
                 """
                 UPDATE withdrawal_requests
@@ -1659,6 +1722,12 @@ class DatabaseService:
                 """,
                 (datetime.now(timezone.utc).isoformat(), admin_id, check_url, withdrawal_id)
             )
+
+            # Начисляем реферальный бонус, если есть реферер
+            referrer_id = self.get_referrer(user_id)
+            if referrer_id:
+                self.add_referral_earning(referrer_id, user_id, amount, 'withdrawal')
+
             connection.commit()
             return True
 
@@ -1744,6 +1813,226 @@ class DatabaseService:
         """Установить процент комиссии за вывод"""
         self.set_setting('withdrawal_fee_percent', str(percent))
 
+    # Moderation methods
+    def get_pending_resources(self) -> list[dict]:
+        """Получить все ресурсы на модерации"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, owner_user_id, owner_username, title, url, created_at
+                FROM user_resources
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_resource_by_id(self, resource_id: int) -> dict | None:
+        """Получить ресурс по ID"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, owner_user_id, owner_username, title, url, category, status, created_at
+                FROM user_resources
+                WHERE id = ?
+                """,
+                (resource_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def approve_resource(self, resource_id: int, admin_id: int, category: str) -> bool:
+        """Одобрить ресурс и установить категорию"""
+        now = self._now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE user_resources
+                SET status = 'approved', category = ?, moderated_at = ?, moderated_by = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (category, now, admin_id, resource_id)
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def decline_resource(self, resource_id: int, admin_id: int) -> bool:
+        """Отклонить ресурс"""
+        now = self._now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE user_resources
+                SET status = 'declined', moderated_at = ?, moderated_by = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (now, admin_id, resource_id)
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def count_pending_resources(self) -> int:
+        """Подсчитать количество ресурсов на модерации"""
+        with self._connect() as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) FROM user_resources
+                WHERE status = 'pending'
+                """
+            ).fetchone()[0]
+        return count
+
+    # Referral system methods
+    def add_referral(self, referrer_user_id: int, referred_user_id: int) -> bool:
+        """Добавить реферала"""
+        now = self._now()
+        with self._connect() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO referrals (referrer_user_id, referred_user_id, created_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    (referrer_user_id, referred_user_id, now)
+                )
+                return True
+            except sqlite3.IntegrityError:
+                # Пользователь уже имеет реферера
+                return False
+
+    def get_referrer(self, user_id: int) -> int | None:
+        """Получить ID реферера пользователя"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT referrer_user_id FROM referrals
+                WHERE referred_user_id = ?
+                """,
+                (user_id,)
+            ).fetchone()
+        return row[0] if row else None
+
+    def get_referral_stats(self, user_id: int) -> dict:
+        """Получить статистику рефералов пользователя"""
+        with self._connect() as connection:
+            # Количество рефералов
+            referrals_count = connection.execute(
+                """
+                SELECT COUNT(*) FROM referrals
+                WHERE referrer_user_id = ?
+                """,
+                (user_id,)
+            ).fetchone()[0]
+
+            # Заработано с рефералов
+            referral_earnings = connection.execute(
+                """
+                SELECT COALESCE(SUM(amount), 0) FROM referral_earnings
+                WHERE referrer_user_id = ?
+                """,
+                (user_id,)
+            ).fetchone()[0]
+
+        return {
+            "referrals_count": referrals_count,
+            "referral_earnings": round(float(referral_earnings or 0), 2)
+        }
+
+    def add_referral_earning(self, referrer_user_id: int, referred_user_id: int, amount: float, reason: str) -> bool:
+        """Добавить заработок с реферала (5% от суммы)"""
+        now = self._now()
+        referral_bonus = amount * 0.05  # 5% от суммы
+
+        with self._connect() as connection:
+            # Добавляем запись о заработке с реферала
+            connection.execute(
+                """
+                INSERT INTO referral_earnings (referrer_user_id, referred_user_id, amount, reason, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (referrer_user_id, referred_user_id, referral_bonus, reason, now)
+            )
+
+            # Начисляем бонус рефереру через earnings
+            connection.execute(
+                """
+                INSERT INTO earnings (owner_user_id, chat_id, member_user_id, amount, reason, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (referrer_user_id, referrer_user_id, referred_user_id, referral_bonus, f"referral_{reason}", now)
+            )
+
+            connection.commit()
+        return True
+
+    # Chat moderation methods
+    def get_pending_chats(self) -> list[dict]:
+        """Получить все чаты на модерации"""
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT chat_id, owner_user_id, owner_username, owner_full_name, chat_title, chat_link, created_at
+                FROM chat_owners
+                WHERE status = 'pending'
+                ORDER BY created_at ASC
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_chat_by_id(self, chat_id: int) -> dict | None:
+        """Получить чат по ID"""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT chat_id, owner_user_id, owner_username, owner_full_name, chat_title, chat_link, chat_category, status, created_at
+                FROM chat_owners
+                WHERE chat_id = ?
+                """,
+                (chat_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def approve_chat(self, chat_id: int, admin_id: int, category: str) -> bool:
+        """Одобрить чат и установить категорию"""
+        now = self._now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE chat_owners
+                SET status = 'approved', chat_category = ?, moderated_at = ?, moderated_by = ?
+                WHERE chat_id = ? AND status = 'pending'
+                """,
+                (category, now, admin_id, chat_id)
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def decline_chat(self, chat_id: int, admin_id: int) -> bool:
+        """Отклонить чат"""
+        now = self._now()
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE chat_owners
+                SET status = 'declined', moderated_at = ?, moderated_by = ?
+                WHERE chat_id = ? AND status = 'pending'
+                """,
+                (now, admin_id, chat_id)
+            )
+            connection.commit()
+        return cursor.rowcount > 0
+
+    def count_pending_chats(self) -> int:
+        """Подсчитать количество чатов на модерации"""
+        with self._connect() as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*) FROM chat_owners
+                WHERE status = 'pending'
+                """
+            ).fetchone()[0]
+        return count
+
+
     def get_user_detailed_info(self, user_id: int) -> dict:
         """Получить детальную информацию о пользователе для админа"""
         with self._connect() as connection:
@@ -1775,10 +2064,10 @@ class DatabaseService:
                 (user_id,),
             ).fetchall()
 
-            # Ресурсы пользователя
+            # Ресурсы пользователя (все статусы)
             resources = connection.execute(
                 """
-                SELECT title, url, created_at
+                SELECT title, url, category, status, created_at
                 FROM user_resources
                 WHERE owner_user_id = ?
                 ORDER BY created_at DESC

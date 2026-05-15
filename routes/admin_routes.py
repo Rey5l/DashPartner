@@ -11,6 +11,10 @@ from keyboards.admin_keyboard import (
     get_admin_resources_keyboard,
     get_admin_settings_keyboard,
     get_admin_back_keyboard,
+    get_moderation_actions_keyboard,
+    get_category_keyboard,
+    get_chat_moderation_actions_keyboard,
+    get_chat_category_keyboard,
 )
 from keyboards.reply_keyboard import get_admin_reply_keyboard
 from texts.admin_texts import (
@@ -139,9 +143,18 @@ async def admin_statistics_callback(callback: CallbackQuery):
         return
 
     stats = database.get_admin_statistics()
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 10 дней", callback_data="admin_stats_graph_10")
+    kb.button(text="📊 20 дней", callback_data="admin_stats_graph_20")
+    kb.button(text="📊 30 дней", callback_data="admin_stats_graph_30")
+    kb.button(text="🔙 Назад", callback_data="admin_panel")
+    kb.adjust(3, 1)
+
     await callback.message.edit_text(
         render_admin_statistics_text(stats),
-        reply_markup=get_admin_back_keyboard(),
+        reply_markup=kb.as_markup(),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -216,9 +229,18 @@ async def admin_resource_stats_callback(callback: CallbackQuery):
         return
 
     stats = database.get_resource_statistics()
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 10 дней", callback_data="resource_stats_graph_10")
+    kb.button(text="📊 20 дней", callback_data="resource_stats_graph_20")
+    kb.button(text="📊 30 дней", callback_data="resource_stats_graph_30")
+    kb.button(text="🔙 Назад", callback_data="admin_resources")
+    kb.adjust(3, 1)
+
     await callback.message.edit_text(
         render_admin_resource_stats_text(stats),
-        reply_markup=get_admin_back_keyboard(),
+        reply_markup=kb.as_markup(),
         parse_mode="HTML"
     )
     await callback.answer()
@@ -1037,3 +1059,617 @@ async def process_contest_price(message: Message, state: FSMContext):
         await state.clear()
     except ValueError:
         await message.answer("Неверный формат. Отправьте число (например: 0.5)")
+
+
+# Обработчики для графиков статистики
+
+@router.callback_query(F.data.startswith("admin_stats_graph_"))
+async def admin_stats_graph_callback(callback: CallbackQuery):
+    """Генерация графика общей статистики"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer("Генерирую график...")
+
+    # Извлекаем период из callback_data
+    period = int(callback.data.split("_")[-1])
+
+    from services.database_service_stats import DatabaseStatsService
+    from services.chart_generator import generate_statistics_chart, cleanup_old_charts
+    from aiogram.types import FSInputFile
+
+    stats_service = DatabaseStatsService()
+
+    # Получаем данные за период
+    users_data = stats_service.get_users_stats_by_period(period)
+    
+    # Если нет данных, создаем пустой набор
+    if not users_data:
+        from datetime import datetime, timedelta
+        users_data = [(datetime.now() - timedelta(days=i), 0) for i in range(period)]
+
+    # Генерируем график
+    chart_path = generate_statistics_chart(users_data, period, "admin")
+
+    # Отправляем график
+    photo = FSInputFile(chart_path)
+    await callback.message.answer_photo(
+        photo=photo,
+        caption=f"📊 Статистика новых пользователей за {period} дней"
+    )
+
+    # Очищаем старые графики
+    cleanup_old_charts()
+
+
+@router.callback_query(F.data.startswith("resource_stats_graph_"))
+async def resource_stats_graph_callback(callback: CallbackQuery):
+    """Генерация графика статистики ресурсов"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer("Генерирую график...")
+
+    period = int(callback.data.split("_")[-1])
+
+    from services.database_service_stats import DatabaseStatsService
+    from services.chart_generator import generate_statistics_chart, cleanup_old_charts
+    from aiogram.types import FSInputFile
+
+    stats_service = DatabaseStatsService()
+    resources_data = stats_service.get_resources_stats_by_period(period)
+
+    if not resources_data:
+        from datetime import datetime, timedelta
+        resources_data = [(datetime.now() - timedelta(days=i), 0) for i in range(period)]
+
+    chart_path = generate_statistics_chart(resources_data, period, "resources")
+
+    photo = FSInputFile(chart_path)
+    await callback.message.answer_photo(
+        photo=photo,
+        caption=f"📊 Статистика новых ресурсов за {period} дней"
+    )
+
+    cleanup_old_charts()
+
+
+# ==================== МОДЕРАЦИЯ РЕСУРСОВ ====================
+
+@router.callback_query(F.data == "admin_moderation")
+async def admin_moderation_callback(callback: CallbackQuery):
+    """Показать список ресурсов на модерации"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    pending_resources = database.get_pending_resources()
+    pending_count = len(pending_resources)
+
+    if not pending_resources:
+        await callback.message.edit_text(
+            "✅ <b>Модерация ресурсов</b>\n\n"
+            "Нет ресурсов на модерации.",
+            parse_mode="HTML",
+            reply_markup=get_admin_back_keyboard()
+        )
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    kb = InlineKeyboardBuilder()
+
+    for resource in pending_resources[:20]:  # Показываем первые 20
+        rid = resource["id"]
+        title = resource["title"]
+        user_id = resource["owner_user_id"]
+        username = resource.get("owner_username") or "N/A"
+
+        kb.button(
+            text=f"ID:{rid} | @{username} | {title[:30]}",
+            callback_data=f"mod_view:{rid}"
+        )
+
+    kb.button(text="🔙 Назад", callback_data="admin_panel")
+    kb.adjust(1)
+
+    await callback.message.edit_text(
+        f"✅ <b>Модерация ресурсов</b>\n\n"
+        f"📊 Всего на модерации: <code>{pending_count}</code>\n\n"
+        f"Выберите ресурс для проверки:",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("mod_view:"))
+async def mod_view_callback(callback: CallbackQuery):
+    """Просмотр ресурса на модерации"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    resource_id = int(callback.data.split(":")[1])
+    resource = database.get_resource_by_id(resource_id)
+
+    if not resource or resource['status'] != 'pending':
+        await callback.answer("❌ Ресурс не найден или уже обработан", show_alert=True)
+        return
+
+    user_id = resource['owner_user_id']
+    username = resource.get('owner_username') or 'N/A'
+    title = resource['title']
+    url = resource['url']
+    created_at = resource['created_at'][:19]
+
+    text = f"""📢 <b>РЕСУРС НА МОДЕРАЦИИ</b>
+
+👤 Пользователь: <code>@{username}</code>
+🆔 User ID: <code>{user_id}</code>
+
+📝 Название: <b>{title}</b>
+🔗 Ссылка: <code>{url}</code>
+📅 Создан: <code>{created_at}</code>
+🔖 ID ресурса: <code>{resource_id}</code>
+"""
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_moderation_actions_keyboard(resource_id),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("mod_accept:"))
+async def mod_accept_callback(callback: CallbackQuery):
+    """Принять ресурс - показать выбор категории"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    resource_id = int(callback.data.split(":")[1])
+    resource = database.get_resource_by_id(resource_id)
+
+    if not resource or resource['status'] != 'pending':
+        await callback.answer("❌ Ресурс не найден или уже обработан", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"📢 <b>Выберите категорию для ресурса</b>\n\n"
+        f"📝 Название: <b>{resource['title']}</b>\n"
+        f"🔗 Ссылка: <code>{resource['url']}</code>",
+        reply_markup=get_category_keyboard(resource_id),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("mod_category:"))
+async def mod_category_callback(callback: CallbackQuery):
+    """Установить категорию и одобрить ресурс"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    resource_id = int(parts[1])
+    category = parts[2]
+
+    resource = database.get_resource_by_id(resource_id)
+
+    if not resource or resource['status'] != 'pending':
+        await callback.answer("❌ Ресурс не найден или уже обработан", show_alert=True)
+        return
+
+    # Одобряем ресурс с категорией
+    success = database.approve_resource(resource_id, callback.from_user.id, category)
+
+    if success:
+        await callback.answer("✅ Ресурс одобрен!", show_alert=True)
+
+        # Уведомляем пользователя
+        try:
+            await callback.bot.send_message(
+                resource['owner_user_id'],
+                f"✅ <b>Ваш ресурс одобрен!</b>\n\n"
+                f"📝 Название: <b>{resource['title']}</b>\n"
+                f"🔗 Ссылка: <code>{resource['url']}</code>\n"
+                f"📂 Категория: <b>{category}</b>\n\n"
+                f"Теперь вы можете использовать его при создании конкурсов.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+        # Возвращаемся к списку модерации
+        pending_resources = database.get_pending_resources()
+        pending_count = len(pending_resources)
+
+        if not pending_resources:
+            await callback.message.edit_text(
+                "✅ <b>Модерация ресурсов</b>\n\n"
+                "Нет ресурсов на модерации.",
+                parse_mode="HTML",
+                reply_markup=get_admin_back_keyboard()
+            )
+            return
+
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+        kb = InlineKeyboardBuilder()
+
+        for res in pending_resources[:20]:
+            rid = res["id"]
+            title = res["title"]
+            username = res.get("owner_username") or "N/A"
+
+            kb.button(
+                text=f"ID:{rid} | @{username} | {title[:30]}",
+                callback_data=f"mod_view:{rid}"
+            )
+
+        kb.button(text="🔙 Назад", callback_data="admin_panel")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"✅ <b>Модерация ресурсов</b>\n\n"
+            f"📊 Всего на модерации: <code>{pending_count}</code>\n\n"
+            f"Выберите ресурс для проверки:",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer("❌ Ошибка при одобрении", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("mod_decline:"))
+async def mod_decline_callback(callback: CallbackQuery):
+    """Отклонить ресурс"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    resource_id = int(callback.data.split(":")[1])
+    resource = database.get_resource_by_id(resource_id)
+
+    if not resource or resource['status'] != 'pending':
+        await callback.answer("❌ Ресурс не найден или уже обработан", show_alert=True)
+        return
+
+    # Отклоняем ресурс
+    success = database.decline_resource(resource_id, callback.from_user.id)
+
+    if success:
+        await callback.answer("❌ Ресурс отклонен", show_alert=True)
+
+        # Уведомляем пользователя
+        try:
+            await callback.bot.send_message(
+                resource['owner_user_id'],
+                f"❌ <b>Ваш ресурс не прошел модерацию</b>\n\n"
+                f"📝 Название: <b>{resource['title']}</b>\n"
+                f"🔗 Ссылка: <code>{resource['url']}</code>\n\n"
+                f"Пожалуйста, проверьте соответствие ресурса правилам платформы.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+        # Возвращаемся к списку модерации
+        pending_resources = database.get_pending_resources()
+        pending_count = len(pending_resources)
+
+        if not pending_resources:
+            await callback.message.edit_text(
+                "✅ <b>Модерация ресурсов</b>\n\n"
+                "Нет ресурсов на модерации.",
+                parse_mode="HTML",
+                reply_markup=get_admin_back_keyboard()
+            )
+            return
+
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+        kb = InlineKeyboardBuilder()
+
+        for res in pending_resources[:20]:
+            rid = res["id"]
+            title = res["title"]
+            username = res.get("owner_username") or "N/A"
+
+            kb.button(
+                text=f"ID:{rid} | @{username} | {title[:30]}",
+                callback_data=f"mod_view:{rid}"
+            )
+
+        kb.button(text="🔙 Назад", callback_data="admin_panel")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"✅ <b>Модерация ресурсов</b>\n\n"
+            f"📊 Всего на модерации: <code>{pending_count}</code>\n\n"
+            f"Выберите ресурс для проверки:",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer("❌ Ошибка при отклонении", show_alert=True)
+
+
+# ==================== МОДЕРАЦИЯ ЧАТОВ ====================
+
+@router.callback_query(F.data == "admin_moderation_chats")
+async def admin_moderation_chats_callback(callback: CallbackQuery):
+    """Показать список чатов на модерации"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    pending_chats = database.get_pending_chats()
+    pending_count = len(pending_chats)
+
+    if not pending_chats:
+        await callback.message.edit_text(
+            "✅ <b>Модерация чатов</b>\n\n"
+            "Нет чатов на модерации.",
+            parse_mode="HTML",
+            reply_markup=get_admin_back_keyboard()
+        )
+        return
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+    kb = InlineKeyboardBuilder()
+
+    for chat in pending_chats[:20]:  # Показываем первые 20
+        chat_id = chat["chat_id"]
+        title = chat.get("chat_title") or f"Chat {chat_id}"
+        user_id = chat["owner_user_id"]
+
+        kb.button(
+            text=f"ID:{chat_id} | User:{user_id} | {title[:30]}",
+            callback_data=f"chat_mod_view:{chat_id}"
+        )
+
+    kb.button(text="🔙 Назад", callback_data="admin_panel")
+    kb.adjust(1)
+
+    await callback.message.edit_text(
+        f"💬 <b>Модерация чатов</b>\n\n"
+        f"📊 Всего на модерации: <code>{pending_count}</code>\n\n"
+        f"Выберите чат для проверки:",
+        reply_markup=kb.as_markup(),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("chat_mod_view:"))
+async def chat_mod_view_callback(callback: CallbackQuery):
+    """Просмотр чата на модерации"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    chat_id = int(callback.data.split(":")[1])
+    chat = database.get_chat_by_id(chat_id)
+
+    if not chat or chat['status'] != 'pending':
+        await callback.answer("❌ Чат не найден или уже обработан", show_alert=True)
+        return
+
+    user_id = chat['owner_user_id']
+    title = chat.get('chat_title') or f"Chat {chat_id}"
+    chat_link = chat.get('chat_link') or 'не указана'
+    created_at = chat['created_at'][:19]
+
+    text = f"""💬 <b>ЧАТ НА МОДЕРАЦИИ</b>
+
+👤 Владелец: <code>{user_id}</code>
+
+📝 Название: <b>{title}</b>
+🔗 Ссылка: <code>{chat_link}</code>
+🆔 Chat ID: <code>{chat_id}</code>
+📅 Добавлен: <code>{created_at}</code>
+"""
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=get_chat_moderation_actions_keyboard(chat_id),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("chat_mod_accept:"))
+async def chat_mod_accept_callback(callback: CallbackQuery):
+    """Принять чат - показать выбор категории"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    await callback.answer()
+
+    chat_id = int(callback.data.split(":")[1])
+    chat = database.get_chat_by_id(chat_id)
+
+    if not chat or chat['status'] != 'pending':
+        await callback.answer("❌ Чат не найден или уже обработан", show_alert=True)
+        return
+
+    title = chat.get('chat_title') or f"Chat {chat_id}"
+    chat_link = chat.get('chat_link') or 'не указана'
+
+    await callback.message.edit_text(
+        f"💬 <b>Выберите категорию для чата</b>\n\n"
+        f"📝 Название: <b>{title}</b>\n"
+        f"🔗 Ссылка: <code>{chat_link}</code>",
+        reply_markup=get_chat_category_keyboard(chat_id),
+        parse_mode="HTML"
+    )
+
+
+@router.callback_query(F.data.startswith("chat_mod_category:"))
+async def chat_mod_category_callback(callback: CallbackQuery):
+    """Установить категорию и одобрить чат"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    parts = callback.data.split(":")
+    chat_id = int(parts[1])
+    category = parts[2]
+
+    chat = database.get_chat_by_id(chat_id)
+
+    if not chat or chat['status'] != 'pending':
+        await callback.answer("❌ Чат не найден или уже обработан", show_alert=True)
+        return
+
+    # Одобряем чат с категорией
+    success = database.approve_chat(chat_id, callback.from_user.id, category)
+
+    if success:
+        await callback.answer("✅ Чат одобрен!", show_alert=True)
+
+        title = chat.get('chat_title') or f"Chat {chat_id}"
+
+        # Уведомляем пользователя
+        try:
+            await callback.bot.send_message(
+                chat['owner_user_id'],
+                f"✅ <b>Ваш чат одобрен!</b>\n\n"
+                f"📝 Название: <b>{title}</b>\n"
+                f"🆔 Chat ID: <code>{chat_id}</code>\n"
+                f"📂 Категория: <b>{category}</b>\n\n"
+                f"Теперь вы можете использовать его для продажи трафика.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+        # Возвращаемся к списку модерации
+        pending_chats = database.get_pending_chats()
+        pending_count = len(pending_chats)
+
+        if not pending_chats:
+            await callback.message.edit_text(
+                "💬 <b>Модерация чатов</b>\n\n"
+                "Нет чатов на модерации.",
+                parse_mode="HTML",
+                reply_markup=get_admin_back_keyboard()
+            )
+            return
+
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+        kb = InlineKeyboardBuilder()
+
+        for ch in pending_chats[:20]:
+            cid = ch["chat_id"]
+            title = ch.get("chat_title") or f"Chat {cid}"
+            user_id = ch["owner_user_id"]
+
+            kb.button(
+                text=f"ID:{cid} | User:{user_id} | {title[:30]}",
+                callback_data=f"chat_mod_view:{cid}"
+            )
+
+        kb.button(text="🔙 Назад", callback_data="admin_panel")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"💬 <b>Модерация чатов</b>\n\n"
+            f"📊 Всего на модерации: <code>{pending_count}</code>\n\n"
+            f"Выберите чат для проверки:",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer("❌ Ошибка при одобрении", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("chat_mod_decline:"))
+async def chat_mod_decline_callback(callback: CallbackQuery):
+    """Отклонить чат"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("У вас нет доступа", show_alert=True)
+        return
+
+    chat_id = int(callback.data.split(":")[1])
+    chat = database.get_chat_by_id(chat_id)
+
+    if not chat or chat['status'] != 'pending':
+        await callback.answer("❌ Чат не найден или уже обработан", show_alert=True)
+        return
+
+    # Отклоняем чат
+    success = database.decline_chat(chat_id, callback.from_user.id)
+
+    if success:
+        await callback.answer("❌ Чат отклонен", show_alert=True)
+
+        title = chat.get('chat_title') or f"Chat {chat_id}"
+
+        # Уведомляем пользователя
+        try:
+            await callback.bot.send_message(
+                chat['owner_user_id'],
+                f"❌ <b>Ваш чат не прошел модерацию</b>\n\n"
+                f"📝 Название: <b>{title}</b>\n"
+                f"🆔 Chat ID: <code>{chat_id}</code>\n\n"
+                f"Пожалуйста, проверьте соответствие чата правилам платформы.",
+                parse_mode="HTML"
+            )
+        except:
+            pass
+
+        # Возвращаемся к списку модерации
+        pending_chats = database.get_pending_chats()
+        pending_count = len(pending_chats)
+
+        if not pending_chats:
+            await callback.message.edit_text(
+                "💬 <b>Модерация чатов</b>\n\n"
+                "Нет чатов на модерации.",
+                parse_mode="HTML",
+                reply_markup=get_admin_back_keyboard()
+            )
+            return
+
+        from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+        kb = InlineKeyboardBuilder()
+
+        for ch in pending_chats[:20]:
+            cid = ch["chat_id"]
+            title = ch.get("chat_title") or f"Chat {cid}"
+            user_id = ch["owner_user_id"]
+
+            kb.button(
+                text=f"ID:{cid} | User:{user_id} | {title[:30]}",
+                callback_data=f"chat_mod_view:{cid}"
+            )
+
+        kb.button(text="🔙 Назад", callback_data="admin_panel")
+        kb.adjust(1)
+
+        await callback.message.edit_text(
+            f"💬 <b>Модерация чатов</b>\n\n"
+            f"📊 Всего на модерации: <code>{pending_count}</code>\n\n"
+            f"Выберите чат для проверки:",
+            reply_markup=kb.as_markup(),
+            parse_mode="HTML"
+        )
+    else:
+        await callback.answer("❌ Ошибка при отклонении", show_alert=True)
+

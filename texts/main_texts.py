@@ -339,3 +339,32 @@ subscription_success_text = """
 def render_chat_tasks_text(user_name: str, user_id: int) -> str:
     return f"""<tg-emoji emoji-id="5472279086657199080">📢</tg-emoji> <a href="tg://user?id={user_id}"><b>{user_name}</b></a>, подпишитесь на спонсоров ниже, чтобы писать в чат.
 """
+
+
+cabinet_text = """<tg-emoji emoji-id="5258011929993026890">👤</tg-emoji> <b>Кабинет</b>
+
+Выберите нужный раздел."""
+
+
+def render_referral_text(user_id: int, referrals_count: int = 0, referral_earnings: float = 0.0, referral_link: str = "") -> str:
+    return f"""👥 <b>Реферальная программа</b>
+
+Приглашайте новых владельцев чатов и получайте 5% от их заработка!
+Бонус начисляется автоматически при выводе и пополнении средств рефералом.
+
+📈 <b>Ваша статистика:</b>
+├ Приглашено: <code>{referrals_count}</code> чел.
+└ Заработано: <code>{referral_earnings:.2f} ₽</code>
+
+🔗 <b>Ваша ссылка:</b>
+<code>{referral_link}</code>"""
+
+
+about_service_text = """🌐 <b>О сервисе</b>
+
+Piar Flow — экосистема для продвижения в Telegram. Сервис объединяет рекламодателей и исполнителей, помогает запускать рекламные задания и получать целевой трафик для Telegram-проектов.
+
+Цель сервиса — сделать продвижение доступным, прозрачным и автоматизированным.
+
+Выберите нужный раздел."""
+

@@ -28,6 +28,9 @@ from keyboards.main_keyboard import (
     get_resources_list_keyboard,
     get_sell_traffic_keyboard,
     get_subscription_keyboard,
+    get_cabinet_keyboard,
+    get_referral_keyboard,
+    get_about_keyboard,
 )
 from keyboards.reply_keyboard import get_admin_reply_keyboard, get_user_reply_keyboard
 from config import ADMIN_IDS
@@ -50,6 +53,9 @@ from texts.main_texts import (
     render_resources_list_text,
     sell_traffic_text,
     subscription_success_text,
+    cabinet_text,
+    render_referral_text,
+    about_service_text,
 )
 
 router = Router()
@@ -390,10 +396,12 @@ async def send_chat_subscription_tasks(target: Message | CallbackQuery, user_id:
     )
 
     if not tasks:
-        if isinstance(target, CallbackQuery):
-            await target.message.answer(subscription_success_text, parse_mode="HTML")
-        else:
-            await target.answer(subscription_success_text, parse_mode="HTML")
+        # Не отправляем сообщение об успехе в групповых чатах
+        if not is_group_chat_id(chat_id):
+            if isinstance(target, CallbackQuery):
+                await target.message.answer(subscription_success_text, parse_mode="HTML")
+            else:
+                await target.answer(subscription_success_text, parse_mode="HTML")
         return True
 
     # Получаем имя пользователя
@@ -436,11 +444,13 @@ async def send_chat_subscription_tasks(target: Message | CallbackQuery, user_id:
         if not remaining:
             if chat_id and is_group_chat_id(chat_id):
                 await grant_chat_access(chat_id=chat_id, member_user_id=uid)
-
-            try:
-                await sent_message.reply(subscription_success_text, parse_mode="HTML")
-            except Exception as e:
-                print(f"[ROUTES] failed to send completion message: {e}")
+                # Не отправляем сообщение об успехе в групповых чатах
+            else:
+                # Отправляем сообщение об успехе только в личных чатах
+                try:
+                    await sent_message.reply(subscription_success_text, parse_mode="HTML")
+                except Exception as e:
+                    print(f"[ROUTES] failed to send completion message: {e}")
 
     asyncio.create_task(
         subscription_checker.start_checking(
@@ -457,6 +467,17 @@ async def send_chat_subscription_tasks(target: Message | CallbackQuery, user_id:
 @router.message(Command("start"))
 async def start(message: Message):
     start_parts = (message.text or "").split(maxsplit=1)
+
+    # Обработка реферальной ссылки
+    if len(start_parts) > 1 and start_parts[1].isdigit():
+        referrer_id = int(start_parts[1])
+        # Проверяем, что пользователь не пытается стать рефералом самого себя
+        if referrer_id != message.from_user.id:
+            # Пытаемся добавить реферала
+            added = database.add_referral(referrer_id, message.from_user.id)
+            if added:
+                print(f"[REFERRAL] User {message.from_user.id} added as referral of {referrer_id}")
+
     if len(start_parts) > 1 and start_parts[1].startswith("contest_"):
         raw_contest_id = start_parts[1].split("contest_", 1)[1]
         try:
@@ -546,6 +567,11 @@ async def bot_added_to_chat(event: ChatMemberUpdated):
     if actor is None or actor.is_bot:
         return
 
+    # Пытаемся получить ссылку на чат
+    chat_link = None
+    if event.chat.username:
+        chat_link = f"https://t.me/{event.chat.username}"
+
     full_name = " ".join(part for part in [actor.first_name, actor.last_name] if part).strip() or str(actor.id)
     database.register_chat_owner(
         chat_id=event.chat.id,
@@ -553,11 +579,25 @@ async def bot_added_to_chat(event: ChatMemberUpdated):
         owner_username=actor.username,
         owner_full_name=full_name,
         chat_title=event.chat.title,
+        chat_link=chat_link,
     )
     print(
         f"[DB] chat owner registered: chat_id={event.chat.id}, owner_user_id={actor.id}, "
         f"chat_title={event.chat.title!r}"
     )
+
+    # Уведомляем пользователя о том, что чат отправлен на модерацию
+    try:
+        await event.bot.send_message(
+            actor.id,
+            f"📝 <b>Чат отправлен на модерацию</b>\n\n"
+            f"💬 Название: <b>{event.chat.title}</b>\n"
+            f"🆔 Chat ID: <code>{event.chat.id}</code>\n\n"
+            f"⏳ Ожидайте одобрения администратором. После одобрения вы сможете использовать чат для продажи трафика.",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"[ROUTES] Failed to send moderation notification: {e}")
 
 
 @router.message(Command("tasks"))
@@ -570,8 +610,20 @@ async def tasks_command(message: Message):
         f"chat_type={message.chat.type}"
     )
 
+    # Проверяем, является ли пользователь администратором чата
+    if message.chat.type in {"group", "supergroup"}:
+        try:
+            member = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
+            if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+                print(f"[ROUTES] User {message.from_user.id} is admin in chat {message.chat.id}, skipping tasks")
+                return
+        except Exception as e:
+            print(f"[ROUTES] Failed to check admin status: {e}")
+
     if await is_user_subscribed(message.from_user.id, message.from_user.language_code):
-        await message.answer(subscription_success_text, parse_mode="HTML")
+        # Не отправляем сообщение об успехе в групповых чатах
+        if message.chat.type == "private":
+            await message.answer(subscription_success_text, parse_mode="HTML")
         return
 
     await send_chat_subscription_tasks(
@@ -904,10 +956,19 @@ async def contest_stats_callback(callback: CallbackQuery):
     await callback.answer()
     contests = database.list_owner_contests(callback.from_user.id)
     stats = database.get_owner_stats(callback.from_user.id)
+
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 10 дней", callback_data="contest_stats_graph_10")
+    kb.button(text="📊 20 дней", callback_data="contest_stats_graph_20")
+    kb.button(text="📊 30 дней", callback_data="contest_stats_graph_30")
+    kb.button(text="🔙 Назад", callback_data="sell_traffic")
+    kb.adjust(3, 1)
+
     await callback.message.edit_text(
         text=render_contests_stats_text(contests, stats['reward_per_subscription']),
         parse_mode="HTML",
-        reply_markup=get_contests_stats_keyboard(),
+        reply_markup=kb.as_markup(),
     )
 
 
@@ -971,9 +1032,10 @@ async def resource_add_url(message: Message, state: FSMContext):
     else:
         title = url
 
-    # Добавляем ресурс
+    # Добавляем ресурс на модерацию
     added = database.add_user_resource(
         owner_user_id=message.from_user.id,
+        owner_username=message.from_user.username,
         title=title,
         url=url
     )
@@ -982,8 +1044,8 @@ async def resource_add_url(message: Message, state: FSMContext):
 
     if added:
         await message.answer(
-            f"✅ Ресурс <b>{title}</b> успешно добавлен!\n\n"
-            "Теперь вы можете использовать его при создании конкурсов.",
+            f"✅ Ресурс <b>{title}</b> отправлен на модерацию!\n\n"
+            "После проверки администратором вы сможете использовать его при создании конкурсов.",
             parse_mode="HTML"
         )
     else:
@@ -1961,11 +2023,44 @@ async def buy_traffic_callback(callback: CallbackQuery):
 @router.callback_query(F.data == "cabinet")
 async def cabinet_callback(callback: CallbackQuery):
     await callback.answer()
-    stats = database.get_owner_stats(callback.from_user.id)
     await callback.message.edit_text(
-        text=render_profile_text(stats),
+        text=cabinet_text,
         parse_mode="HTML",
-        reply_markup=get_profile_keyboard(),
+        reply_markup=get_cabinet_keyboard(),
+    )
+
+
+@router.callback_query(F.data == "cabinet_referral")
+async def cabinet_referral_callback(callback: CallbackQuery):
+    await callback.answer()
+
+    # Получаем реальные данные о рефералах из базы данных
+    referral_stats = database.get_referral_stats(callback.from_user.id)
+    referrals_count = referral_stats['referrals_count']
+    referral_earnings = referral_stats['referral_earnings']
+
+    user_id = callback.from_user.id
+    bot_username = os.getenv("BOT_USERNAME")
+    if not bot_username:
+        me = await callback.bot.get_me()
+        bot_username = me.username
+
+    referral_link = f"https://t.me/{bot_username}?start={user_id}"
+
+    await callback.message.edit_text(
+        text=render_referral_text(user_id, referrals_count, referral_earnings, referral_link),
+        parse_mode="HTML",
+        reply_markup=get_referral_keyboard(referral_link),
+    )
+
+
+@router.callback_query(F.data == "cabinet_about")
+async def cabinet_about_callback(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.edit_text(
+        text=about_service_text,
+        parse_mode="HTML",
+        reply_markup=get_about_keyboard(),
     )
 
 
@@ -1991,6 +2086,15 @@ async def group_message_guard(message: Message):
         f"[ROUTES] group_message_guard: chat_id={message.chat.id}, user_id={message.from_user.id}, "
         f"message_id={message.message_id}, text={message.text!r}"
     )
+
+    # Проверяем, является ли пользователь администратором чата
+    try:
+        member = await message.bot.get_chat_member(message.chat.id, message.from_user.id)
+        if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+            print(f"[ROUTES] User {message.from_user.id} is admin in chat {message.chat.id}, allowing message")
+            return
+    except Exception as e:
+        print(f"[ROUTES] Failed to check admin status: {e}")
 
     if database.is_member_approved(chat_id=message.chat.id, member_user_id=message.from_user.id):
         print(
@@ -2043,3 +2147,124 @@ async def group_message_guard(message: Message):
         user_id=message.from_user.id,
         language_code=message.from_user.language_code,
     )
+
+
+# Обработчик для графика статистики конкурсов
+
+@router.callback_query(F.data.startswith("contest_stats_graph_"))
+async def contest_stats_graph_callback(callback: CallbackQuery):
+    """Генерация графика статистики конкурсов"""
+    await callback.answer("Генерирую график...")
+
+    period = int(callback.data.split("_")[-1])
+
+    from services.database_service_stats import DatabaseStatsService
+    from services.chart_generator import generate_statistics_chart, cleanup_old_charts
+    from aiogram.types import FSInputFile
+    from datetime import datetime, timedelta
+
+    stats_service = DatabaseStatsService()
+    contests_data = stats_service.get_contests_stats_by_period(period, callback.from_user.id)
+
+    if not contests_data:
+        contests_data = [(datetime.now() - timedelta(days=i), 0) for i in range(period)]
+
+    chart_path = generate_statistics_chart(contests_data, period, "contests")
+
+    photo = FSInputFile(chart_path)
+    await callback.message.answer_photo(
+        photo=photo,
+        caption=f"📊 Статистика участников конкурсов за {period} дней"
+    )
+
+    cleanup_old_charts()
+
+
+@router.callback_query(F.data.startswith("chat_stats:"))
+async def chat_stats_callback(callback: CallbackQuery):
+    """Показать статистику конкретного чата с кнопками выбора периода"""
+    await callback.answer()
+    _, _, raw_chat_id = callback.data.partition(":")
+    try:
+        chat_id = int(raw_chat_id)
+    except ValueError:
+        await callback.message.answer("Некорректный идентификатор чата.")
+        return
+
+    chat = database.get_chat_settings(callback.from_user.id, chat_id)
+    if chat is None:
+        await callback.message.answer("Чат не найден или не принадлежит вам.")
+        return
+
+    # Получаем базовую статистику чата
+    from aiogram.utils.keyboard import InlineKeyboardBuilder
+    
+    # Подсчитываем общее количество одобренных пользователей
+    approved_count = database.count_approved_members(chat_id)
+    
+    text = (
+        f"📊 <b>Статистика чата</b>\n\n"
+        f"💬 <b>Название:</b> {chat.get('chat_title', 'Неизвестно')}\n"
+        f"👥 <b>Одобрено пользователей:</b> {approved_count}\n\n"
+        f"Выберите период для просмотра графика:"
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="📊 10 дней", callback_data=f"chat_stats_graph:{chat_id}:10")
+    kb.button(text="📊 20 дней", callback_data=f"chat_stats_graph:{chat_id}:20")
+    kb.button(text="📊 30 дней", callback_data=f"chat_stats_graph:{chat_id}:30")
+    kb.button(text="🔙 Назад", callback_data=f"chat_card:{chat_id}")
+    kb.adjust(3, 1)
+
+    await callback.message.edit_text(
+        text,
+        parse_mode="HTML",
+        reply_markup=kb.as_markup()
+    )
+
+
+@router.callback_query(F.data.startswith("chat_stats_graph:"))
+async def chat_stats_graph_callback(callback: CallbackQuery):
+    """Генерация графика статистики конкретного чата"""
+    await callback.answer("Генерирую график...")
+
+    # Парсим данные из callback_data: chat_stats_graph:chat_id:period
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        await callback.message.answer("Ошибка в данных запроса.")
+        return
+
+    try:
+        chat_id = int(parts[1])
+        period = int(parts[2])
+    except ValueError:
+        await callback.message.answer("Некорректные данные.")
+        return
+
+    # Проверяем права доступа
+    chat = database.get_chat_settings(callback.from_user.id, chat_id)
+    if chat is None:
+        await callback.message.answer("Чат не найден или не принадлежит вам.")
+        return
+
+    from services.database_service_stats import DatabaseStatsService
+    from services.chart_generator import generate_statistics_chart, cleanup_old_charts
+    from aiogram.types import FSInputFile
+    from datetime import datetime, timedelta
+
+    stats_service = DatabaseStatsService()
+    chat_data = stats_service.get_chat_stats_by_period(chat_id, period)
+
+    if not chat_data:
+        chat_data = [(datetime.now() - timedelta(days=i), 0) for i in range(period)]
+
+    chart_path = generate_statistics_chart(chat_data, period, "users")
+
+    photo = FSInputFile(chart_path)
+    chat_title = chat.get('chat_title', 'Неизвестно')
+    await callback.message.answer_photo(
+        photo=photo,
+        caption=f"📊 Статистика одобренных пользователей\n💬 Чат: {chat_title}\n📅 Период: {period} дней"
+    )
+
+    cleanup_old_charts()

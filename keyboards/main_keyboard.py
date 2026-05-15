@@ -29,7 +29,7 @@ def get_profile_keyboard():
 def get_sell_traffic_keyboard():
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="Чаты", callback_data="sell_traffic_chats", icon_custom_emoji_id="5443038326535759644", style='primary')],
+            [InlineKeyboardButton(text="Чаты", callback_data="sell_traffic_chats", icon_custom_emoji_id="5443038326535759644")],
             [InlineKeyboardButton(text="Боты", callback_data="sell_traffic_bots", icon_custom_emoji_id="5332724926216428039")],
             [InlineKeyboardButton(text="Конкурсы", callback_data="sell_traffic_contests", icon_custom_emoji_id="5305699699204837855")],
             [InlineKeyboardButton(text="Назад", callback_data="back", icon_custom_emoji_id="5386716938619604706")],
@@ -93,6 +93,7 @@ def get_chat_settings_keyboard(chat_id: int, gate_enabled: bool):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🔄 Обновить статистику", callback_data=f"chat_card:{chat_id}")],
+            [InlineKeyboardButton(text="📊 Статистика", callback_data=f"chat_stats:{chat_id}")],
             [InlineKeyboardButton(text="⚙️ Настройки", callback_data=f"chat_settings:{chat_id}")],
             [
                 InlineKeyboardButton(
@@ -330,3 +331,34 @@ def get_contest_cancel_keyboard():
             [InlineKeyboardButton(text="❌ Отменить создание", callback_data="contest_create_cancel")]
         ]
     )
+
+
+def get_cabinet_keyboard():
+    """Клавиатура для раздела Кабинет"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Реферальная система", callback_data="cabinet_referral")],
+            [InlineKeyboardButton(text="🌐 О сервисе", callback_data="cabinet_about")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back")],
+        ]
+    )
+
+
+def get_referral_keyboard(referral_link: str):
+    """Клавиатура для реферальной системы"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Скопировать ссылку", url=f"https://t.me/share/url?url={referral_link}")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="cabinet")],
+        ]
+    )
+
+
+def get_about_keyboard():
+    """Клавиатура для раздела О сервисе"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="cabinet")],
+        ]
+    )
+
